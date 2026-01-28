@@ -141,6 +141,76 @@ async function downloadImage(page, url, outputPath) {
         el => el.innerHTML
     );
 
+    // ARE COLOURS VISIBLE?
+    const hasVisibleColors = await page.$eval(
+        '#gryffColors',
+        el => el.querySelectorAll('.colorbox').length >= 2
+    );
+
+
+    // BASE & EYE COLOURS
+    let baseColor = null;
+    let eyeColor = null;
+
+    if (hasVisibleColors) {
+        const colors = await page.$$eval(
+            '#gryffColors .colorbox',
+            boxes => boxes.map(b => b.innerText.trim())
+        );
+
+        baseColor = colors[0] ?? null;
+        eyeColor = colors[1] ?? null;
+    }
+
+
+    // MARKING/MUTATION BLOCKS
+    const blocks = await page.$$(
+        '.row.align-items-stretch .p-3.text-center.col'
+    );
+
+
+    const markings = [];
+    const mutations = [];
+
+    for (const block of blocks) {
+    const text = await block.$eval(
+        '.text-center.text-nowrap',
+        el => el.innerText.trim()
+    );
+
+    // Optional color
+    const color = await block.$eval(
+        '.colorbox',
+        el => el.innerText.trim()
+    ).catch(() => null);
+
+    // "Swan: 75"
+    const markingMatch = text.match(/^(.+?):\s*(\d+)$/);
+
+    if (markingMatch) {
+        markings.push({
+        name: markingMatch[1],
+        opacity: parseInt(markingMatch[2], 10),
+        color
+        });
+        continue;
+    }
+
+    // "Horns: Carry"
+    const mutationMatch = text.match(/^(.+?):\s*(Show|Carry)$/i);
+
+    if (mutationMatch) {
+        mutations.push({
+        name: mutationMatch[1],
+        visibility: mutationMatch[2],
+        color
+        });
+        continue;
+    }
+
+    console.warn(`Unrecognized marking/mutation format: ${text}`);
+    }
+
     // IMAGES
     const prefix = Math.floor(parseInt(gryff.id, 10) / 1000);
     const mainImageUrl = `https://gryffs.com/static/gryffs/${prefix}/${gryff.id}.png`;
@@ -200,6 +270,10 @@ async function downloadImage(page, url, outputPath) {
         losses,
         totalBattles,
         huntingExp,
+        baseColor,
+        eyeColor,
+        markings,
+        mutations,
         descriptionHtml,
         sourceUrl: gryff.url
     };
