@@ -1,9 +1,14 @@
-const { chromium } = require('playwright');
+process.on('uncaughtException', err => {
+  console.error(err);
+  require('fs').writeFileSync('crash.log', err.stack);
+});
+
+process.env.PLAYWRIGHT_DISABLE_MCP = '1';
+const { chromium } = require('playwright-core');
 const fs = require('fs-extra');
 const path = require('path');
 
-const OUTPUT_DIR = path.join(__dirname, 'archive');
-//const GRYFFS_JSON = path.join(OUTPUT_DIR, 'gryffs.json');
+const OUTPUT_DIR = path.join(process.cwd(), 'archive');
 
 // DOWNLOADER
 async function downloadImage(page, url, outputPath) {
@@ -15,6 +20,11 @@ async function downloadImage(page, url, outputPath) {
     await fs.writeFile(outputPath, buffer);
 }
 
+// SLEEPER
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 (async () => {
     console.log('GRYFFS ARCHIVER IS STARTING, PLEASE WAIT...');
 
@@ -22,7 +32,17 @@ async function downloadImage(page, url, outputPath) {
     fs.ensureDirSync(OUTPUT_DIR);
 
     // Launch browser
-    const browser = await chromium.launch({ headless: false });
+    //const browser = await chromium.launch({ headless: false });
+    const browser = await chromium.launch({
+        executablePath: path.join(
+            process.cwd(),
+            'chromium',
+            'chrome-win64',
+            'chrome.exe'
+        ),
+        headless: false
+    });
+
     const context = await browser.newContext();
     const page = await context.newPage();
 
@@ -67,221 +87,236 @@ async function downloadImage(page, url, outputPath) {
     );
 
     console.log(`Found ${gryffs.length} gryffs!`);
+    console.log('Beginning scrape...');
+    console.log('This may take a while. Do not use or close either window, unless you want to stop the scrape.');
+    console.log('If you close the browser or this window at any time, restarting GryffsArchiver later will pick up the scrape where it left off.');
+    
+    for (const gryff of gryffs) {
+        await page.goto(gryff.url);
 
-    // TEMP HARDCODE ID, NO LOOP YET
-    const gryff = {id: "5193", url: "https://gryffs.com/gryff.php?id=5193"};
-    await page.goto(gryff.url);
+        const gryffDir = path.join(OUTPUT_DIR, 'gryffs', gryff.id);
+        await fs.ensureDir(gryffDir);
 
-    const gryffDir = path.join(OUTPUT_DIR, 'gryffs', gryff.id);
-    await fs.ensureDir(gryffDir);
+        const infoPath = path.join(gryffDir, 'info.json');
+        if (await fs.pathExists(infoPath)) {
+            console.log(`Skipping Gryff ${gryff.id} (already scraped!)`);
+            continue;
+        }
+        console.log(`Scraping Gryff ${gryff.id}...`);
 
-    // NAME
-    const rawName = await page.$eval(
-        'h1.page-title',
-        el => el.innerText.trim()
-    );
+        // NAME
+        const rawName = await page.$eval(
+            'h1.page-title',
+            el => el.innerText.trim()
+        );
 
-    // "Gryff - Name" -> "Name"
-    const name = rawName.replace(/^Gryff\s*-\s*/i, '');
+        // "Gryff - Name" -> "Name"
+        const name = rawName.replace(/^Gryff\s*-\s*/i, '');
 
-    // SPECIES, LEVEL, EXP
-    const separatorText = await page.$eval(
-        'div.pageSeparator',
-        el => el.innerText
-    );
+        // SPECIES, LEVEL, EXP
+        const separatorText = await page.$eval(
+            'div.pageSeparator',
+            el => el.innerText
+        );
 
-    const sepMatch = separatorText.match(/^(.+?)\s+Gryff\s+Level\s+(\d+)\s+\((\d+)\s+exp\)/i);
+        const sepMatch = separatorText.match(/^(.+?)\s+Gryff\s+Level\s+(\d+)\s+\((\d+)\s+exp\)/i);
 
-    if (!sepMatch) {
-        throw new Error(`Could not parse pageSeparator: ${separatorText}`);
-    }
+        if (!sepMatch) {
+            throw new Error(`Could not parse pageSeparator: ${separatorText}`);
+        }
 
-    const species = sepMatch[1].trim();
-    const level = parseInt(sepMatch[2], 10);
-    const exp = parseInt(sepMatch[3], 10);
+        const species = sepMatch[1].trim();
+        const level = parseInt(sepMatch[2], 10);
+        const exp = parseInt(sepMatch[3], 10);
 
-    // WINS / LOSSES
-    const statsText = await page.$$eval(
-    'div',
-    divs => divs
-        .map(d => d.innerText.trim())
-        .find(t => /\d+\s+Wins\s*\/\s*\d+\s+Losses/i.test(t))
-    );
-
-    if (!statsText) {
-        throw new Error('Wins/Losses block not found');
-    }
-
-    const statsMatch = statsText.match(/(\d+)\s+Wins\s*\/\s*(\d+)\s+Losses/i);
-
-    const wins = parseInt(statsMatch[1], 10);
-    const losses = parseInt(statsMatch[2], 10);
-    const totalBattles = wins + losses;
-
-    // HUNTING EXP
-    const huntingText = await page.$$eval(
+        // WINS / LOSSES
+        const statsText = await page.$$eval(
         'div',
         divs => divs
             .map(d => d.innerText.trim())
-            .find(t => /\d+\s+Hunting\s+Exp/i.test(t))
+            .find(t => /\d+\s+Wins\s*\/\s*\d+\s+Losses/i.test(t))
         );
 
-        if (!huntingText) {
-            throw new Error('Hunting Exp block not found');
+        if (!statsText) {
+            throw new Error('Wins/Losses block not found');
         }
 
-        const huntingExp = parseInt(
-        huntingText.match(/(\d+)\s+Hunting\s+Exp/i)[1],
-        10
-    );
+        const statsMatch = statsText.match(/(\d+)\s+Wins\s*\/\s*(\d+)\s+Losses/i);
 
-    // DESCRIPTION
-    let descriptionHtml = await page.$eval(
-        '#gryffsDesc',
-        el => el.innerHTML
-    );
+        const wins = parseInt(statsMatch[1], 10);
+        const losses = parseInt(statsMatch[2], 10);
+        const totalBattles = wins + losses;
 
-    // ARE COLOURS VISIBLE?
-    const hasVisibleColors = await page.$eval(
-        '#gryffColors',
-        el => el.querySelectorAll('.colorbox').length >= 2
-    );
-
-
-    // BASE & EYE COLOURS
-    let baseColor = null;
-    let eyeColor = null;
-
-    if (hasVisibleColors) {
-        const colors = await page.$$eval(
-            '#gryffColors .colorbox',
-            boxes => boxes.map(b => b.innerText.trim())
-        );
-
-        baseColor = colors[0] ?? null;
-        eyeColor = colors[1] ?? null;
-    }
-
-
-    // MARKING/MUTATION BLOCKS
-    const blocks = await page.$$(
-        '.row.align-items-stretch .p-3.text-center.col'
-    );
-
-
-    const markings = [];
-    const mutations = [];
-
-    for (const block of blocks) {
-    const text = await block.$eval(
-        '.text-center.text-nowrap',
-        el => el.innerText.trim()
-    );
-
-    // Optional color
-    const color = await block.$eval(
-        '.colorbox',
-        el => el.innerText.trim()
-    ).catch(() => null);
-
-    // "Swan: 75"
-    const markingMatch = text.match(/^(.+?):\s*(\d+)$/);
-
-    if (markingMatch) {
-        markings.push({
-        name: markingMatch[1],
-        opacity: parseInt(markingMatch[2], 10),
-        color
-        });
-        continue;
-    }
-
-    // "Horns: Carry"
-    const mutationMatch = text.match(/^(.+?):\s*(Show|Carry)$/i);
-
-    if (mutationMatch) {
-        mutations.push({
-        name: mutationMatch[1],
-        visibility: mutationMatch[2],
-        color
-        });
-        continue;
-    }
-
-    console.warn(`Unrecognized marking/mutation format: ${text}`);
-    }
-
-    // IMAGES
-    const prefix = Math.floor(parseInt(gryff.id, 10) / 1000);
-    const mainImageUrl = `https://gryffs.com/static/gryffs/${prefix}/${gryff.id}.png`;
-    const thumbUrl = `https://gryffs.com/static/gryffs/thumbs/${prefix}/${gryff.id}.png`;
-
-    // DOWNLOAD IMAGE AND THUMBNAIL
-    await downloadImage(
-        page,
-        mainImageUrl,
-        path.join(gryffDir, 'image.png')
-    );
-
-    await fs.ensureDir(path.join(OUTPUT_DIR, 'thumbs'));
-
-    await downloadImage(
-        page,
-        thumbUrl,
-        path.join(OUTPUT_DIR, 'thumbs', `${gryff.id}.png`)
-    );
-
-    // DOWNLOAD DESC IMAGES
-    const descImageUrls = await page.$$eval(
-        '#gryffsDesc img',
-        imgs => imgs.map(img => img.src)
-    );
-
-    let descIndex = 1;
-
-    for (const imgUrl of descImageUrls) {
-        const ext = path.extname(new URL(imgUrl).pathname) || '.png';
-        const localName = `desc_${descIndex}${ext}`;
-        const localPath = path.join(gryffDir, localName);
-
-        try {
-            await downloadImage(page, imgUrl, localPath);
-
-            // Rewrite HTML to local path
-            descriptionHtml = descriptionHtml.replaceAll(
-            imgUrl,
-            `./${localName}`
+        // HUNTING EXP
+        const huntingText = await page.$$eval(
+            'div',
+            divs => divs
+                .map(d => d.innerText.trim())
+                .find(t => /\d+\s+Hunting\s+Exp/i.test(t))
             );
 
-            descIndex++;
-        } catch (err) {
-            console.warn(`Failed desc image: ${imgUrl}`);
+            if (!huntingText) {
+                throw new Error('Hunting Exp block not found');
+            }
+
+            const huntingExp = parseInt(
+            huntingText.match(/(\d+)\s+Hunting\s+Exp/i)[1],
+            10
+        );
+
+        // DESCRIPTION
+        const descEl = await page.$('#gryffsDesc');
+        let descriptionHtml = descEl
+        ? await descEl.evaluate(el => el.innerHTML)
+        : null;
+
+        // ARE COLOURS VISIBLE?
+        const hasVisibleColors = await page.$eval(
+            '#gryffColors',
+            el => el.querySelectorAll('.colorbox').length >= 2
+        );
+
+
+        // BASE & EYE COLOURS
+        let baseColor = null;
+        let eyeColor = null;
+
+        if (hasVisibleColors) {
+            const colors = await page.$$eval(
+                '#gryffColors .colorbox',
+                boxes => boxes.map(b => b.innerText.trim())
+            );
+
+            baseColor = colors[0] ?? null;
+            eyeColor = colors[1] ?? null;
         }
+
+
+        // MARKING/MUTATION BLOCKS
+        const blocks = await page.$$(
+            '.row.align-items-stretch .p-3.text-center.col'
+        );
+
+
+        const markings = [];
+        const mutations = [];
+
+        for (const block of blocks) {
+        const text = await block.$eval(
+            '.text-center.text-nowrap',
+            el => el.innerText.trim()
+        );
+
+        // Optional color
+        const color = await block.$eval(
+            '.colorbox',
+            el => el.innerText.trim()
+        ).catch(() => null);
+
+        // "Swan: 75"
+        const markingMatch = text.match(/^(.+?):\s*(\d+)$/);
+
+        if (markingMatch) {
+            markings.push({
+            name: markingMatch[1],
+            opacity: parseInt(markingMatch[2], 10),
+            color
+            });
+            continue;
+        }
+
+        // "Horns: Carry"
+        const mutationMatch = text.match(/^(.+?):\s*(Show|Carry)$/i);
+
+        if (mutationMatch) {
+            mutations.push({
+            name: mutationMatch[1],
+            visibility: mutationMatch[2],
+            color
+            });
+            continue;
+        }
+
+        console.warn(`Unrecognized marking/mutation format: ${text}`);
+        }
+
+        // IMAGES
+        const prefix = Math.floor(parseInt(gryff.id, 10) / 1000);
+        const mainImageUrl = `https://gryffs.com/static/gryffs/${prefix}/${gryff.id}.png`;
+        const thumbUrl = `https://gryffs.com/static/gryffs/thumbs/${prefix}/${gryff.id}.png`;
+
+        // DOWNLOAD IMAGE AND THUMBNAIL
+        await downloadImage(
+            page,
+            mainImageUrl,
+            path.join(gryffDir, 'image.png')
+        );
+
+        await fs.ensureDir(path.join(OUTPUT_DIR, 'thumbs'));
+
+        await downloadImage(
+            page,
+            thumbUrl,
+            path.join(OUTPUT_DIR, 'thumbs', `${gryff.id}.png`)
+        );
+
+        // DOWNLOAD DESC IMAGES
+        if (descriptionHtml) {
+            const descImageUrls = await page.$$eval(
+                '#gryffsDesc img',
+                imgs => imgs.map(img => img.src)
+            );
+
+            let descIndex = 1;
+
+            for (const imgUrl of descImageUrls) {
+                const ext = path.extname(new URL(imgUrl).pathname) || '.png';
+                const localName = `desc_${descIndex}${ext}`;
+                const localPath = path.join(gryffDir, localName);
+
+                try {
+                    await downloadImage(page, imgUrl, localPath);
+
+                    // Rewrite HTML to local path
+                    descriptionHtml = descriptionHtml.replaceAll(
+                    imgUrl,
+                    `./${localName}`
+                    );
+
+                    descIndex++;
+                } catch (err) {
+                    console.warn(`Failed desc image: ${imgUrl}`);
+                }
+            }
+        }
+
+        // WRITE INFO FILE
+        const info = {
+            id: gryff.id,
+            name,
+            species,
+            level,
+            exp,
+            wins,
+            losses,
+            totalBattles,
+            huntingExp,
+            baseColor,
+            eyeColor,
+            markings,
+            mutations,
+            descriptionHtml,
+            sourceUrl: gryff.url
+        };
+
+        await fs.writeJson(
+            path.join(gryffDir, 'info.json'),
+            info,
+            { spaces: 2 }
+        );
+
+        await sleep(1500 + Math.random() * 1000);
     }
-
-    // WRITE INFO FILE
-    const info = {
-        id: gryff.id,
-        name,
-        species,
-        level,
-        exp,
-        wins,
-        losses,
-        totalBattles,
-        huntingExp,
-        baseColor,
-        eyeColor,
-        markings,
-        mutations,
-        descriptionHtml,
-        sourceUrl: gryff.url
-    };
-
-    await fs.writeJson(
-        path.join(gryffDir, 'info.json'),
-        info,
-        { spaces: 2 }
-    );
-
+    console.log('Scrape complete! You may now close this window.');
+    process.stdin.resume();
 })();
